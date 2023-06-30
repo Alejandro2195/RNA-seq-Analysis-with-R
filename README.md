@@ -18,5 +18,3 @@ In this case we are going to work with a dataset used by the article by Gerarduz
 - 3 Mice without fibrosis and with overexpression of Smoc2
 - 4 mice with fibrosis and with overexpression of Smoc2
 Essentially, one wants to know if gene expression is differential between groups.
-
-First we need the gene-associated read counts and the associated sample metadata
