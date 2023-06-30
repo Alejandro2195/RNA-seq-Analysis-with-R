@@ -1,0 +1,292 @@
+---
+title: "RNA seq Analysis"
+email: alejandrorex95@gmail.com
+output:
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    code_download: TRUE
+    theme: united
+  csl: apa.csl
+---
+
+## Packages used
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(RColorBrewer)
+library(pheatmap)
+library(tidyverse)
+library(edgeR)
+library(DESeq2)
+library(ashr)
+library(RColorBrewer)
+```
+
+If we have doubts about the steps or the operation of the tools we can use the following function to help us
+
+```{r, warning=FALSE}
+vignette("DESeq2")
+```
+
+In general, the analysis of differential expression for RNA-seq is divided into two steps (each one that in turn includes other steps):
+
+QA:
+- Count of gene-associated reads
+- Normalization
+- Unsupervised cluster analysis
+
+Differential Expression Analysis
+- Modeling of raw counts for each gene
+- Reduced log2 fold changes
+- Test the differential expression
+
+## Case study
+
+In this case we are going to work with a dataset used by the article by Gerarduzzi et al., 2017 (DOI: 10.1172/jci.insight.90299). Basically, they want to know why mice overexpressing the Smoc2 gene are more likely to develop renal fibrosis. In this case, two sample groups are being tested:
+- 3 Mice without fibrosis and with overexpression of Smoc2
+- 4 mice with fibrosis and with overexpression of Smoc2
+Essentially, one wants to know if gene expression is differential between groups.
+
+First we need the gene-associated read counts and the associated sample metadata
+
+```{r, warning=FALSE}
+# We load the raw readings
+smoc2_rawcounts <- read.csv("E:/02 Estudio/00 NOTAS IMPORTANTES/R - Notas/Datasets/fibrosis_smoc2_rawcounts_unordered.csv", row.names = 1)
+
+# We can make dataframe with the metadata used
+genotype<-rep("smoc2",7)
+condition<-c("fibrosis", "fibrosis", "fibrosis", "fibrosis", "normal", "normal", "normal")
+row_names<-c("smoc2_fibrosis1", "smoc2_fibrosis2","smoc2_fibrosis3","smoc2_fibrosis4" , "smoc2_normal1","smoc2_normal3","smoc2_normal4")
+smoc2_metadata<-data.frame(genotype,condition,row.names = row_names)
+smoc2_metadata
+```
+
+## Data organization
+
+When comparing the names of the metadata and those of the readings, they are not in the same order. DESeq2 requires both to be in the same order in order to perform analyzes
+
+```{r, warning=FALSE}
+# We check if the names are in the same order
+all(rownames(smoc2_metadata)==colnames(smoc2_rawcounts))
+
+# We reorder the column names in the dataset guided by the metadata
+reorder_idx <- match(rownames(smoc2_metadata), colnames(smoc2_rawcounts))
+
+# We replace the names of the dataset columns with those already ordered
+reordered_smoc2_rawcounts <- smoc2_rawcounts[ , reorder_idx]
+
+# We create a DESeq2 object
+dds_smoc2<-DESeqDataSetFromMatrix(countData = reordered_smoc2_rawcounts, colData = smoc2_metadata, design = ~ condition)
+dds_smoc2
+```
+
+## Normalization of raw counts
+
+Normalization is the process of scaling the raw count values to account for "uninteresting" factors. In this way, expression levels are more comparable between and/or within samples. The main factors to consider are the depth of the library, the length of the genes and the composition of the RNA.
+
+```{r, warning=FALSE}
+# We calculate the normalized counts and assign them to a variable
+dds_smoc2 <- estimateSizeFactors(dds_smoc2)
+# DESeq2 will use these size factors to normalize the raw counts. The raw counts for each sample are divided by the sample-specific size factor associated with the normalization
+
+# We look at the size factors used for normalization
+sizeFactors(dds_smoc2)
+
+# Once normalized, we can extract the counts
+dds_smoc2_normalized <- counts(dds_smoc2, normalized=TRUE)
+```
+
+## Unsupervised cluster analysis
+
+With the counts normalized, we can now compare the counts between the different samples to see how different they are from each other. To do this, we use visualization methods for unsupervised clustering analysis, such as hierarchical clustering heat maps, or Principal Component Analysis. Through these analyzes we can obtain a general idea of our samples and identify atypical samples.
+
+```{r, warning=FALSE}
+# For RNA-seq data, DESeq2 uses a variance stabilizer transform (VST). This is a logarithmic transformation that moderates the variance through the mean.
+vsd_smoc2<-vst(dds_smoc2, blind = TRUE) # blind=TRUE expresses that the transformation should be blind to the sample information given in the design formula.
+
+# We extract the vsd matrix from the vsd object
+vsd_mat_smoc2 <- assay(vsd_smoc2)
+
+# We make a correlation matrix
+vsd_cor_smoc2 <- cor(vsd_mat_smoc2)
+vsd_cor_smoc2
+
+# We generate a heat map using the results of the correlation
+pheatmap(vsd_cor_smoc2, annotation = smoc2_metadata["condition"])
+
+# The annotation argument selects the factors to be used as annotation bars, in this case we use the condition column of the metadata dataset
+
+```
+
+## Principal Component Analysis (PCA)
+
+PCA finds the principal components of a data set, with the first components being the ones that explain the greatest variance of the data.
+
+```{r, warning=FALSE}
+# We created a PCA
+plotPCA(vsd_smoc2, intgroup="condition") # Intgroup is the argument to specify which factor from the metadata to use to color the graph
+
+```
+
+## Differential Expression Analysis
+
+```{r, warning=FALSE}
+# Here we use the DESeq2 object created above to apply differential expression analysis
+dds_smoc2 <- DESeq(dds_smoc2) # By default, this function performs the Wald test for pairwise comparisons to test for differences between two groups of samples for the condition of interest.
+
+```
+
+Before looking at the results we need to see how well the data fit the model. To see the variation in the data, we will look at the variation in gene expression relative to the mean. The variance, being the square of the standard deviation, represents how far the expression of the individual samples is from the mean.
+For RNA-seq data, the variance is typically expected to increase with mean gene expression.
+
+To see this variation we can calculate the mean and variance for each gene in the samples using the apply() function.
+
+apply() syntax:
+apply(data, rows/columns, function to apply)
+
+```{r}
+# We calculate the mean and variance for each gene (each row) - in this case only from the samples with fibrosis
+mean_counts<- apply(reordered_smoc2_rawcounts[, 1:4], 1, mean)
+variance_counts<- apply(reordered_smoc2_rawcounts[, 1:4], 1, var)
+
+# Then we can create a data set with these variables to plot with ggplot2
+df<-data.frame(mean_counts, variance_counts)
+
+ggplot(df, aes(x=mean_counts, y=variance_counts))+
+  geom_point()+
+  scale_y_log10()+
+  scale_x_log10()+
+  xlab("Mean counts per gene")+
+  ylab("Variance per gene")
+
+```
+
+We can also see the dispersion of the data. Dispersion is a measure of the variance for a given mean. The dispersion in this case is used to assess the variability in expression when modeling the counts. An increase in the variance causes greater dispersion, while an increase in the mean decreases the dispersion.
+
+```{r}
+# We plot the dispersion
+plotDispEsts(dds_smoc2)
+```
+
+When the dispersion does not decrease as the mean increases or remains very high, it could be due to outliers or contamination of the sample.
+
+## Extraction of the results of the Differential Expression tests
+
+Now that we have explored the fit of the data to the model, we can extract the results of the Differential Expression tests.
+
+We see the results for a probability that the differences are due to chance of 5% (value of alpha). You can add the contrast parameter to specify the base condition of the sample (which would be normal in this case) and the condition to compare (fibrosis), as well as the factor to compare (condition). It is advisable to do this since sometimes, by default, the base condition of the sample is not adequate to make the comparison more understandable. For example, in this case of using the function "results(dds_smoc2, alpha=0.05)" fibrosis would be the base condition, which is not ideal.
+
+Syntax
+results(DESeq2 object, contrast= c("factor to compare", "condition to compare", "sample base condition"), alpha=0.05)
+
+```{r, warning=FALSE}
+smoc2_res<-results(dds_smoc2, contrast= c("condition", "fibrosis", "normal"), alpha=0.05)
+smoc2_res
+```
+
+We can make an MA plot to better understand the results. This plot shows the mean of the normalized counts against the log2 fold change for all genes tested.
+In the graph all the genes colored in blue (in this case) present a significant differential expression
+
+```{r}
+plotMA(smoc2_res, alpha=0.1)
+```
+
+To improve the estimated fold changes we can use the log2 fold contraction. For genes with little information available, this contraction uses information from all genes to generate lower, most likely fold change estimates.
+
+```{r}
+smoc2_res<-lfcShrink(dds_smoc2, contrast = c("condition", "fibrosis", "normal"), type = "ashr", res = smoc2_res)
+plotMA(smoc2_res)
+```
+
+
+## Analysis of results
+To get descriptions of the columns in the result table, we can use the mcols() function
+
+```{r, warning=FALSE}
+mcols(smoc2_res)
+```
+There is a 5% probability that differentially expressed genes are false positives, that is, for a sample of more than 47,000 genes there would be more than 2,000 false positives. Therefore, DESeq2 performs a multiple test correction using the Benjamini-Hochberg, or BH method to adjust the p-values for multiple tests and control for the number of false positives. To reduce the number of genes tested, DESeq2 filters out genes that were unlikely to be differentially expressed such as genes with zero counts, genes with low mean values across all samples, and genes with outliers. These genes are represented in the results tables by a NA in the adjusted p column.
+
+```{r}
+head(smoc2_res, n=10)
+
+summary(smoc2_res)
+```
+
+The results show more than 10,000 genes with differential expression (divided into high or low expressed).
+
+The fold change is the difference of a subsequent measurement with respect to the original, for example, if the original measurement is 10 and the subsequent measurement is 20, the fold change is 2 (increased twice). The fold change it uses by default is 1, so log2 of the fold change is 0. The fold change can also be modified to rule out genes that are probably not differentially expressed but whose fold change is greater than one and appear as such, so they could be false positives. To do this we must run the results again.
+
+```{r}
+smoc2_res<-results(dds_smoc2, contrast= c("condition", "fibrosis", "normal"), alpha=0.05, lfcThreshold = 0.32) # we will use a fold change of 1.25 (whose log2 is 0.32)
+smoc2_res
+
+smoc2_res<-lfcShrink(dds_smoc2, contrast = c("condition", "fibrosis", "normal"), type = "ashr", res = smoc2_res)
+```
+
+We compare the results and see that there are indeed fewer genes, indicating that around 4000 genes were discarded from the original result, since their fold change is less than 1.25.
+
+```{r}
+summary(smoc2_res)
+
+# We convert the results into a dataframe and add the logical variable threshold whose value will be TRUE only in cases where the adjusted p is less than 0.05
+smoc2_res_all <- data.frame(smoc2_res) %>% mutate(threshold=padj < 0.05)
+```
+
+
+
+## Visualization of the results
+
+#### Volcano Plot
+
+To make a volcano graph we use the results stored in the smoc2_res_all dataframe. We plot the log2 of the fold change vs. the log10 of the adjusted p, and the differences between the samples with a significant differential expression with those not given by the color (threshold).
+
+```{r, warning=FALSE}
+DESeq2::plotMA(smoc2_res)
+
+ggplot(smoc2_res_all) + 
+        geom_point(aes(x = log2FoldChange, y = -log10(padj), color = threshold)) + 
+        xlab("log2 fold change") + 
+        ylab("-log10 adjusted p-value") + 
+        theme(legend.position = "none", 
+              plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25)))
+```
+
+#### Heat Map
+
+The heat map or heatmap is used to observe the differential expression of a gene. There are generally two criteria that are taken to make these graphs: logFc value (expression rate) that must be greater than 1 (although 2 is usually used) and p-value that must be less than 0.05 .
+
+```{r}
+
+# First we make a subset of the results that contains only the significant cases taking an adjusted p less than 0.05.
+smoc2_res_sig <- subset(smoc2_res_all, padj<0.05)
+
+# We order according to the genes with the lowest p values.
+smoc2_res_sig <- smoc2_res_sig %>%
+  arrange(padj)
+```
+
+We created a subset of the normalized counts initially, but only including genes with significant expression. "smoc2_res_sig" is the dataframe that includes only the significant genes, therefore the subset created will only search for the normalized genes whose names match the significant ones, the rest will be excluded.
+
+```{r}
+sig_norm_counts_smoc2 <- dds_smoc2_normalized[rownames(smoc2_res_sig),]
+
+# We select a color palette
+display.brewer.all()
+heat_colors <- brewer.pal(n = 6, name = "YlOrRd")
+```
+
+We plot the heat map. Remember in annotation to use the select function to select both the metadata dataframe and the parameter to compare, in this case it is condition.
+
+```{r}
+pheatmap(sig_norm_counts_smoc2, 
+         color = heat_colors, 
+         cluster_rows = T, 
+         show_rownames = F,
+         annotation = smoc2_metadata["condition"], 
+         scale = "row")
+```
+
+A marked differentiation between fibrosis/normal conditions is observed. Differentially expressed genes, both up and down are inverted in each cluster. Basically, the genes that are overexpressed in the group with fibrosis are down-expressed in the group without the disease. And the same occurs for the overexpressed genes in the normal group. Therefore, it can be said that there is a significant difference in the levels of gene expression for the fibrosis disease in the tested organisms when compared with organisms that do not present the disease.
